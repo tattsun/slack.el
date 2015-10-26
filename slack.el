@@ -1,30 +1,49 @@
+;; -*- lexical-binding: t -*-
 (require 'websocket)
 (require 'json)
 (require 'web)
 
 (setq slack/token nil)
-(setq slack/rtm-start-url "https://slack.com/api/rtm.start")
+(setq slack/api-base "https://slack.com/api")
+(defun slack/get-api-url (method)
+  (concat slack/api-base
+          (concat "/" method)))
+(setq slack/rtm-start-url (slack/get-api-url "rtm.start"))
 
-(setq slack/rtm-start-query-callback nil)
-(setq slack/rtm-start-query-old-buffer nil)
-(defun slack/rtm-start-query (callback)
-  (setq slack/rtm-start-query-callback callback)
-  (setq slack/rtm-start-query-old-buffer (current-buffer))
-  (let ((url (concat slack/rtm-start-url
-                     (concat "?token=" slack/token))))
+(defun slack/log-debug (log)
+  (message (concat "[debug]slack.el: " log)))
+(defun slack/log (log)
+  (message (concat "[info]slack.el: " log)))
+(defun slack/log-error (log)
+  (message (concat "[error]slack.el: " log)))
+
+(defun slack/rpc-call (method query callback)
+  (let ((url (concat (slack/get-api-url method)
+                     query))
+        (cb (lambda (httpc header data)
+              (funcall callback data))))
     (web-http-get
-     (lambda (httpc header data)
-       (funcall slack/rtm-start-query-callback (slack/parse-rtm-start-response data)))
+     cb
      :url url)))
+
 (defun slack/parse-rtm-start-response (jsonstr)
   (let* ((json-object-type 'hash-table)
          (jsonobj (json-read-from-string jsonstr)))
     (gethash "url" jsonobj)))
 
+
 (defun slack/start ()
-  (slack/rtm-start-query
-   (lambda (wsurl)
-     (websocket-open
-      wsurl
-      :on-message (lambda (websocket frame)
-                    (insert (websocket-frame-payload frame)))))))
+  (slack/rpc-call
+   "rtm.start"
+   (concat "?token=" slack/token)
+   (lambda (data)
+     (let ((wsurl (slack/parse-rtm-start-response data)))
+       (setq slack/websocket
+             (websocket-open
+              wsurl
+              :on-message (lambda (websocket frame)
+                            (slack/log-debug (websocket-frame-payload frame)))
+              :on-close (lambda (websocket) (slack/log "closed"))))))))
+
+(defun slack/stop ()
+  (websocket-close slack/websocket))
