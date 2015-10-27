@@ -2,15 +2,17 @@
 (require 'websocket)
 (require 'json)
 (require 'web)
+(require 'cl-lib)
 
-(setq slack/token nil)
-(setq slack/api-base "https://slack.com/api")
+(defvar slack/token nil)
+(defvar slack/api-base "https://slack.com/api")
 (defun slack/get-api-url (method)
   (concat slack/api-base
           (concat "/" method)))
-(setq slack/rtm-start-url (slack/get-api-url "rtm.start"))
+(defvar slack/rtm-start-url (slack/get-api-url "rtm.start"))
+(defvar slack/websocket nil)
 
-(setq slack/channellist (make-hash-table))
+(defvar slack/channellist (make-hash-table))
 (defun slack/init-channellist ()
   (slack/rpc-call
    "channels.list"
@@ -24,14 +26,21 @@
            (let ((id (gethash "id" channel))
                  (name (gethash "name" channel)))
              (slack/add-to-channellist id name)))
-        channellist)
-       ))))
+        channellist)))))
 (defun slack/add-to-channellist (channelid channelname)
   (puthash (intern channelid) (list 'name channelname) slack/channellist))
 (defun slack/get-from-channellist (channelid)
   (gethash (intern channelid) slack/channellist))
+(defun slack/get-channelid-by-name (channelname)
+  (let ((found '()))
+    (maphash (lambda (k v)
+               (if (string= (plist-get v 'name) channelname)
+                   (push k found)))
+             slack/channellist)
+    (car found)))
 
-(setq slack/userlist (make-hash-table))
+
+(defvar slack/userlist (make-hash-table))
 (defun slack/init-userlist ()
   (slack/rpc-call
    "users.list"
@@ -53,11 +62,13 @@
   (gethash (intern userid) slack/userlist))
 
 (defun slack/log-debug (log)
-  (message (concat "[debug]slack.el: " log)))
+  (with-current-buffer (slack/log-buffer)
+    (goto-char (point-max))
+    (insert "[debug]slack.el: " log "\n")))
 (defun slack/log (log)
-  (message (concat "[info]slack.el: " log)))
+  (message "[info]slack.el: %s" log))
 (defun slack/log-error (log)
-  (message (concat "[error]slack.el: " log)))
+  (message "[error]slack.el: %s" log))
 
 (defun slack/rpc-call (method query callback)
   (let ((url (concat (slack/get-api-url method)
@@ -71,16 +82,21 @@
 (defun slack/parse-rtm-start-response (jsonstr)
   (let* ((json-object-type 'hash-table)
          (jsonobj (json-read-from-string jsonstr)))
-    (gethash "url" jsonobj)))
+    (cond ((gethash "ok" jsonobj)
+           (gethash "url" jsonobj))
+          (t (slack/log-error (concat "request websocket failed: jsonstr"))))))
 
 (defun slack/buffer ()
   (get-buffer-create "*slack*"))
+(defun slack/log-buffer ()
+  (get-buffer-create "*slack-log*"))
 (defun slack/add-message (channelname username message)
   (with-current-buffer (slack/buffer)
+    (goto-char (point-max))
     (insert (concat username "@" channelname ": " message "\n"))))
 
 (defun slack/handle-payload (payload)
-  (message payload)
+  (slack/log-debug payload)
   (let* ((json-object-type 'hash-table)
         (json (json-read-from-string payload))
         (type (gethash "type" json)))
@@ -92,7 +108,15 @@
              (slack/add-message channelname username (gethash "text" json))))
           (t nil))))
 
+(defun slack/send-message (channel message)
+  (let ((jsonobj (list :id 1
+                       :type "message"
+                       :channel channel
+                       :text message)))
+    (websocket-send-text slack/websocket (json-encode jsonobj))))
+
 (defun slack/start ()
+  (slack/stop)
   (slack/init-userlist)
   (slack/init-channellist)
   (slack/rpc-call
@@ -109,4 +133,6 @@
               :on-close (lambda (websocket) (slack/log "closed"))))))))
 
 (defun slack/stop ()
-  (websocket-close slack/websocket))
+  (cond ((null slack/websocket) nil)
+        (t (websocket-close slack/websocket)))
+  (setq slack/websocket nil))
